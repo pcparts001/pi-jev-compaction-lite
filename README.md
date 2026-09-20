@@ -177,7 +177,7 @@ the session is, so the bigger the session, the more it loses — down to
 export OPENROUTER_JEV_API_KEY="sk-or-..."
 ```
 
-This is the same value as `OPENROUTER_API_KEY`. **If it is unset, the extension does
+**If it is unset, the extension does
 nothing and pi's default summarization is used instead** (safe by design).
 
 ### Jev API endpoint
