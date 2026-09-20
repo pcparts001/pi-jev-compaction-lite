@@ -7,6 +7,33 @@ for Claude Code.
 
 > **⚠️ Experimental software.** This extension is in an experimental stage and is provided "as is", without warranty of any kind. **The author assumes no responsibility whatsoever** for any damage or loss arising from its use.
 
+## Install
+
+### Option 1: `pi install` (recommended)
+
+```sh
+pi install ssh://git@github.com/pcparts001/pi-jev-compaction-lite
+```
+
+**Uninstall:**
+
+```sh
+pi remove ssh://git@github.com/pcparts001/pi-jev-compaction-lite
+```
+
+This removes the entry from `settings.json` **and** deletes the cloned
+directory, so the extension is gone completely.
+
+### Option 2: manual placement
+
+```sh
+git clone https://github.com/pcparts001/pi-jev-compaction-lite.git \
+  ~/.pi/agent/extensions/jev-compaction
+```
+
+Because `package.json` declares the entry point via `pi.extensions`, **no file
+renaming is required**.
+
 ## About this extension
 
 ### The problem with default compaction
@@ -141,43 +168,6 @@ the session is, so the bigger the session, the more it loses — down to
 > session is tool output, how repetitive it is, which models you use, and your
 > prompt-cache hit rate. Treat them as an illustration of the mechanism, not as a
 > guarantee for your workload.
-
-## Install
-
-### Option 1: `pi install` (recommended)
-
-```sh
-pi install ssh://git@github.com/pcparts001/pi-jev-compaction-lite
-```
-
-This clones the repository into `~/.pi/agent/git/`, runs `npm install` there,
-and registers the package in `settings.json`. From then on pi manages it:
-it is discovered automatically on startup and re-cloned if the directory is
-ever missing.
-
-> The `npm:pi-jev-compaction-lite` form is not available yet — the package is
-> not published to npm. Once the repository is public, the shorter forms
-> `git:github.com/pcparts001/pi-jev-compaction-lite` and
-> `https://github.com/pcparts001/pi-jev-compaction-lite` also work.
-
-**Uninstall:**
-
-```sh
-pi remove ssh://git@github.com/pcparts001/pi-jev-compaction-lite
-```
-
-This removes the entry from `settings.json` **and** deletes the cloned
-directory, so the extension is gone completely.
-
-### Option 2: manual placement
-
-```sh
-git clone https://github.com/pcparts001/pi-jev-compaction-lite.git \
-  ~/.pi/agent/extensions/jev-compaction
-```
-
-Because `package.json` declares the entry point via `pi.extensions`, **no file
-renaming is required**.
 
 ## Requirements
 
