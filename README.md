@@ -6,21 +6,93 @@
 
 ## About this extension
 
-Normal compaction asks an LLM to summarize the old conversation, which is **lossy**
-(paths, errors, and constraints disappear). This extension **rewrites nothing**.
-It asks Jev (a decision model) to judge each tool call/result and removes only the
-ones judged stale, or shortens them to their head. Text (user / assistant / thinking)
-is kept **verbatim**.
+### The problem with default compaction
 
-```
-Intercepts pi's session_before_compact
-  └─ jev-compaction.ts
-       └─ jev-core.mjs
-            ├─ collectSegments : messages -> text / pair segments
-            ├─ fitState        : fit into Jev's state budget
-            ├─ askJev          : noul questions per pair (batched, parallel)
-            └─ returns a "pruned verbatim archive" with keep / truncate / drop applied
-```
+Pi's default context compaction asks the model you are using to write an LLM summary
+of the conversation so far. That approach has two problems:
+
+**1. Most of the information is thrown away — so you pay for it twice.**
+The summary collapses the whole session into a few thousand tokens. File paths,
+error messages, stack traces and constraints do not survive, so the agent hits the
+same dead ends again and **re-runs tool calls** it has already run.
+
+**2. Summarization itself is not free.**
+The summarizer is your own LLM, and it has to read the entire conversation to write
+the summary. On a large session that is a full extra pass over the context — paid at
+input-token rates — every time compaction fires.
+
+### How Jev compaction addresses this
+
+This extension replaces the LLM summary with a **Jev decision pass**. Jev is not
+asked to write anything; it is asked, for each tool call/result pair, a simple
+binary question: *"does this still matter?"* Everything not judged stale stays in
+the context **word for word**.
+
+- **Fewer re-runs** — paths, errors and constraint text are kept verbatim, so the
+  agent does not lose the facts it already gathered.
+- **Cheaper** — Jev answers per-item questions with a tiny fixed output; it never
+  reads the conversation to write prose.
+
+### Measured results
+
+Real coding sessions. Costs below use the measured pricing of the models named
+in the tables; session names are anonymized.
+
+#### What a compaction costs
+
+A compaction is an ordinary LLM request: the model reads the conversation and
+writes the summary. On a session near the context ceiling that means **reading
+the whole context just to produce a summary**.
+
+Measured on a ~984k-token session (a real compaction point):
+
+| Method | Model | Reads | Writes | Cost per compaction |
+|---|---|---|---|---|
+| Default compaction | model-a — input $0.15/M, output $0.50/M | the whole conversation (~984k tok) | a prose summary (~3.7k tok) | **~$0.12** |
+| Jev compaction | model-b — input $0.042/M, output $0.00/M | a <=32k tok state, repeated per batch (~190–260k tok total) | short per-item answers ($0.00/M) | **~$0.008–0.011** |
+
+That is **roughly 12x cheaper per compaction**, for two structural reasons:
+
+- Jev never reads the full conversation. It reads a compressed state (<=32k
+  tokens) that fits in a single request, repeated a few times in small batches.
+- Its output is a list of per-item probabilities, billed at $0.00/M — not prose
+  at full output rates.
+
+(Default cost varies with prompt-cache hits; the figure above is measured.)
+
+#### How much survives compaction
+
+Compaction is only useful if it keeps the *right* things. To measure that, the
+summary produced by both methods was forced down to the same size — first
+5,000 tokens, then 10,000 tokens — and each result was scored on how much of the
+session's facts still survived. Because the summary size is identical, the only
+remaining difference is *which* information each method chose to keep.
+
+| Method | session-a (summary capped at 5,000 tokens) | session-a (10,000 tokens) | session-b (5,000 tokens) | session-b (10,000 tokens) |
+|---|---|---|---|---|
+| Default compaction | 34% | 45% | 42% | 38% |
+| **Jev compaction** | **79%** | **91%** | **72%** | **78%** |
+
+At the same summary size, Jev kept **2–2.6× more of the session's facts**.
+
+**Sessions at pi's own compaction trigger point** (the table shows the number of
+tokens that were actually fed into compaction):
+
+| Session | Tokens compacted | Default summary tokens | Facts kept (default) | Facts kept (Jev) |
+|---|---|---|---|---|
+| session-a | 983,868 | 3,704 | **2 / 14** | **14 / 14** |
+| session-b | 983,756 | 2,798 | **1 / 14** | **6 / 14** |
+| session-c | 262,144 | 2,658 | 5 / 14 | **14 / 14** |
+
+Default compaction always produces a 2,700–3,700 token summary no matter how large
+the session is, so the bigger the session, the more it loses — down to
+**1–5 of 14 facts (7–36%)**.
+
+> These numbers come from a small set of coding sessions and one model pair.
+> Your results will differ depending on what your project is like — how much of a
+> session is tool output, how repetitive it is, which models you use, and your
+> prompt-cache hit rate. Treat them as an illustration of the mechanism, not as a
+> guarantee for your workload.
 
 Inspired by [fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction)
 for Claude Code.
