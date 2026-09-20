@@ -1,0 +1,33 @@
+{
+  "name": "pi-jev-compaction-lite",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Jev decision-based compaction for Pi Agent — prune stale tool calls/results instead of LLM summarization",
+  "type": "module",
+  "license": "MIT",
+  "author": "pcparts001",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "compaction",
+    "context",
+    "jev"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "jev-compaction.ts",
+    "jev-core.mjs",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./jev-compaction.ts"
+    ]
+  }
+}

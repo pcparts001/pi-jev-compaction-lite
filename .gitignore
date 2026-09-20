@@ -1,0 +1,15 @@
+# agent instructions (must never be committed)
+CLAUDE.md
+AGENTS.md
+
+# secrets / keys
+.env
+.env.*
+*.key
+
+# dependencies
+node_modules/
+
+# logs / scratch
+*.log
+.DS_Store
