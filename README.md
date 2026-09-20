@@ -100,13 +100,15 @@ Everything around that core is designed for pi's compaction model:
    the thinking-tail stages in the state-fitting ladder and the optional
    Jev-judged thinking/args experiments.
 
-What carried over unchanged: the two questions per pair, the 0.5
-`keepThreshold`, head-only truncation of dropped results, the 25%
+What carried over unchanged: the two-questions-per-pair decision format (the
+wording of the questions themselves was rewritten for pi — see "How it works"),
+the 0.5 `keepThreshold`, head-only truncation of dropped results, the 25%
 minimum-reduction fallback (the original's own rule, adopted as
-`JEV_MIN_REDUCTION`), and the 6-message end-pinning. The original's `fileOps`
-list (files read/written/edited, shown next to the summary) was dropped: the
-benchmarked configuration this port reproduces does not use it, and pass 1 is
-exactly that benchmarked algorithm.
+`JEV_MIN_REDUCTION`), and the end-pinning of the first message plus the newest
+6 messages. Pi's default summary also appends a list of files
+read/written/edited (pi collects it itself and shows it next to the summary);
+this port omits that list, because the benchmarked configuration it reproduces
+does not use it — and pass 1 is exactly that benchmarked algorithm.
 
 ### Measured results
 
@@ -140,18 +142,20 @@ That is **roughly 12x cheaper per compaction**, for two structural reasons:
 Compaction is only useful if it keeps the *right* things. To measure that, the
 summary produced by both methods was forced down to the same size — first
 5,000 tokens, then 10,000 tokens — and each result was scored on how much of the
-session's facts still survived. Because the summary size is identical, the only
-remaining difference is *which* information each method chose to keep.
+sessions' facts still survived. Because the summary size is identical, the only
+remaining difference is *which* information each method chose to keep. Each
+column averages a group of anonymized coding sessions: **group-a = 5 sessions,
+group-b = 10 sessions**.
 
-| Method | session-a (summary capped at 5,000 tokens) | session-a (10,000 tokens) | session-b (5,000 tokens) | session-b (10,000 tokens) |
+| Method | group-a, capped at 5,000 tokens | group-a, capped at 10,000 tokens | group-b, capped at 5,000 tokens | group-b, capped at 10,000 tokens |
 |---|---|---|---|---|
 | Default compaction | 34% | 45% | 42% | 38% |
 | **Jev compaction** | **79%** | **91%** | **72%** | **78%** |
 
-At the same summary size, Jev kept **2–2.6× more of the session's facts**.
+At the same summary size, Jev kept **1.7–2.3× more of the sessions' facts**.
 
-**Sessions at pi's own compaction trigger point** (the table shows the number of
-tokens that were actually fed into compaction):
+**Sessions at pi's own compaction trigger point** (the token counts are pi's own
+estimate of the context it fed into compaction, recorded at the trigger point):
 
 | Session | Tokens compacted | Default summary tokens | Facts kept (default) | Facts kept (Jev) |
 |---|---|---|---|---|
@@ -163,11 +167,24 @@ Default compaction always produces a 2,700–3,700 token summary no matter how l
 the session is, so the bigger the session, the more it loses — down to
 **1–5 of 14 facts (7–36%)**.
 
+The Jev figures are **uncapped**: with no size limit this configuration keeps
+most tool calls verbatim, and on these three sessions its summaries came to
+~175k, ~213k and ~53k tokens respectively. That is exactly what the per-pass
+budget (`/jev-compact-threshold`, default 5% of the context window) bounds — and
+the equal-size benchmark above shows retention stays at 72–91% even when forced
+down to 5,000–10,000 tokens.
+
 > These numbers come from a small set of coding sessions and one model pair.
 > Your results will differ depending on what your project is like — how much of a
 > session is tool output, how repetitive it is, which models you use, and your
 > prompt-cache hit rate. Treat them as an illustration of the mechanism, not as a
 > guarantee for your workload.
+>
+> Note: the fact-retention counts in both tables come from an earlier, looser
+> probe scorer (14 probes per session, scored with substring matching that
+> slightly over-counted correct answers). A stricter scorer (17–22 sanitized
+> probes per session) has since replaced it; these tables have not been
+> re-measured with it yet, so treat the exact counts as approximate.
 
 ## Requirements
 
