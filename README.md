@@ -22,13 +22,30 @@ Intercepts pi's session_before_compact
 
 ## Install
 
-### Option 1: `pi install`
+### Option 1: `pi install` (recommended)
 
 ```sh
-pi install npm:pi-jev-compaction-lite
-# or from GitHub
-pi install github:pcparts001/pi-jev-compaction-lite
+pi install ssh://git@github.com/pcparts001/pi-jev-compaction-lite
 ```
+
+This clones the repository into `~/.pi/agent/git/`, runs `npm install` there,
+and registers the package in `settings.json`. From then on pi manages it:
+it is discovered automatically on startup and re-cloned if the directory is
+ever missing.
+
+> The `npm:pi-jev-compaction-lite` form is not available yet — the package is
+> not published to npm. Once the repository is public, the shorter forms
+> `git:github.com/pcparts001/pi-jev-compaction-lite` and
+> `https://github.com/pcparts001/pi-jev-compaction-lite` also work.
+
+**Uninstall:**
+
+```sh
+pi remove ssh://git@github.com/pcparts001/pi-jev-compaction-lite
+```
+
+This removes the entry from `settings.json` **and** deletes the cloned
+directory, so the extension is gone completely.
 
 ### Option 2: manual placement
 
@@ -39,17 +56,6 @@ git clone https://github.com/pcparts001/pi-jev-compaction-lite.git \
 
 Because `package.json` declares the entry point via `pi.extensions`, **no file
 renaming is required**.
-
-### Option 3: two files only
-
-When placing files directly under `~/.pi/agent/extensions/`, `jev-compaction.ts`
-imports `./jev-core.mjs` relatively, so **both files must sit in the same directory**:
-
-```sh
-~/.pi/agent/extensions/jev-compaction/
-├── index.ts      # rename jev-compaction.ts to this
-└── jev-core.mjs
-```
 
 ## Requirements
 
@@ -62,17 +68,16 @@ export OPENROUTER_JEV_API_KEY="sk-or-..."
 This is the same value as `OPENROUTER_API_KEY`. **If it is unset, the extension does
 nothing and pi's default summarization is used instead** (safe by design).
 
-### Warning: dependency on an alpha endpoint
+### Jev API endpoint
 
-This extension uses an **undocumented, non-public alpha endpoint** of OpenRouter.
+This extension uses OpenRouter's alpha decisions endpoint.
 
-| Item | Value | Status |
-|---|---|---|
-| Endpoint | `https://openrouter.ai/api/alpha/decisions` | undocumented (absent from the official docs) |
-| Model | `~typesafe/jev-latest` | **non-public** (does not appear in `/api/v1/models`) |
+| Item | Value |
+|---|---|
+| Endpoint | `https://openrouter.ai/api/alpha/decisions` |
+| Model | `~typesafe/jev-latest` |
 
-- A regular OpenRouter API key works as-is (no special approval needed). Usage is billed.
-- Because it is **alpha**, the API may change or disappear without notice. No availability guarantee.
+- Works with a regular OpenRouter API key. Usage is billed to your account.
 - The Jev model can be overridden via the `JEV_MODEL` environment variable (see below).
   The endpoint itself is fixed to `https://openrouter.ai/api/alpha/decisions` and cannot be changed.
 
@@ -190,7 +195,7 @@ The probabilities and the threshold produce three outcomes:
 - Sessions with few tool logs do not reach a 25% reduction and **fall back to pi's
   default summary** (this is correct behavior).
 - Text messages are never removed, so compression is limited on text-heavy sessions.
-- **Depends on the alpha endpoint** (see above). It may stop working without notice.
+- **Uses the alpha endpoint** (see above).
 - A saturating accumulation is handed to pi's default summary (only that one pass is compressed).
 
 ## License
