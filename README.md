@@ -137,6 +137,25 @@ That is **roughly 12x cheaper per compaction**, for two structural reasons:
 
 (Default cost varies with prompt-cache hits; the figure above is measured.)
 
+#### How long a compaction takes
+
+The default summarizer reads the whole context and writes prose, so its latency
+scales with the session. Jev reads a small state (<=32k tokens) per request and
+its batches run concurrently, so a pass finishes in seconds even near the
+ceiling. Wall-clock of the compaction step itself, on the same three sessions
+and model pair as the tables above:
+
+| Session | Tokens compacted | Default compaction | Jev compaction | Speedup |
+|---|---|---|---|---|
+| session-a | 983,868 | 184 s | 5.5 s | ~33× |
+| session-b | 983,756 | 278 s | 5.3 s | ~53× |
+| session-c | 262,144 | 76 s | 2.3 s | ~33× |
+
+The exact numbers depend on the summarizer model's latency (and on Jev's batch
+count), but the structural gap does not: the default summarizer pays a full
+read-plus-write pass over the context, while every Jev request touches at most
+32k tokens and the requests overlap.
+
 #### How much survives compaction
 
 Compaction is only useful if it keeps the *right* things. To measure that, the
