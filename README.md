@@ -36,27 +36,12 @@ the context **word for word**.
 - **Cheaper** — Jev answers per-item questions with a tiny fixed output; it never
   reads the conversation to write prose.
 
-### Why the original could not run on pi as-is
+### What the port adapts for pi
 
 The decision algorithm itself carries over from [fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction):
 two binary `noul` questions per tool call/result pair (`keep_call` /
-`keep_result`), keep / truncate-to-head / drop decisions, verbatim text. But the
-original is a Claude Code plugin whose whole integration layer is built on
-Claude Code's compaction model, and that model differs from pi's at every joint:
-
-- **It triggers compaction itself.** A `turn.complete` hook watches
-  `context.percent` and calls `$.session.compact()` once it hits
-  `compactAtPercent` (default 60%). The plugin owns the timing.
-- **It replaces the session, not a summary.** The `session.compact` hook
-  receives the full transcript and returns a rebuilt message list. The built-in
-  summarizer is bypassed entirely; the compacted messages *are* the session, so
-  there is no summary object and nothing to chain.
-- **It ships its own transport and limits**: TypeSafe's System One endpoint
-  with a `TYPESAFE_API_KEY` and `jev-latest`, a 25k state / 30k request token
-  budget, and an English-calibrated word heuristic for token estimation.
-
-pi's compaction model differs at each of those joints, so the port is a
-re-implementation of the integration, not a copy of the plugin:
+`keep_result`), keep / truncate-to-head / drop decisions, verbatim text.
+Everything around that core is designed for pi's compaction model:
 
 1. **pi owns the trigger.** The extension cannot decide when to compact. pi
    fires `session_before_compact` on its own schedule — when
@@ -64,46 +49,16 @@ re-implementation of the integration, not a copy of the plugin:
    the ceiling (~984k of 1M), not at 60%. The port obeys that timing and adds
    manual `/jev-compact` (with a 20% floor) plus quarantined `/jev-dev-*`
    commands for testing.
-2. **pi wants a summary, not a session.** The hook must return a summary string
-   plus a `firstKeptEntryId` for a span pi has already chosen — everything older
-   than `keepRecentTokens` (default 20,000 tok) plus the recent turn prefix —
-   and pi stores the result as a single compaction entry in the session. The
-   pruned-verbatim archive is therefore packaged *as* pi's summary. Within that
-   span, the original's pinning (first message + newest 6) still applies.
-3. **pi chains compactions; the original never had to.** Every later pass
-   receives the previous compaction's output as `previousSummary`. The obvious
-   move — showing it to Jev — is fatal: on 1M-token sessions it alone exceeds
-   Jev's ~32k state budget (HTTP 400 max_tokens_exceeded). So the port protects
-   it verbatim: never shown to Jev, concatenated unmodified at the head of the
-   output. Past compactions survive word-for-word and Jev only ever judges the
-   new delta. (pi's default summary does the opposite — it merges the old
-   summary into fresh prose on every pass, a lossy cascade.)
-4. **Accumulation needs a stop sign.** Because the chained archive lives in one
-   context, the port checks `prev + new ≤ contextWindow − keepRecentTokens −
-   reserveTokens` before returning and defers that single pass to pi's default
-   summary if the sum would re-trigger compaction immediately. The original
-   needed no such guard: its output replaced messages in place and nothing
-   accumulated.
-5. **A different endpoint meant re-measured limits.** The port talks to
-   OpenRouter's alpha `/decisions` endpoint (a regular `OPENROUTER_*` key and
-   `~typesafe/jev-latest`) rather than TypeSafe's System One. Its ceilings were
-   measured by binary search — 65,536 input tokens (= 2^16) per request and
-   ~32,958 for state-only — run at a 0.85 safety ratio, with question batches
-   that self-split when a 400 max_tokens_exceeded still occurs.
-6. **Japanese-heavy sessions broke the original's estimator.** The original
-   estimates tokens with an English word heuristic tuned to overestimate
-   slightly. On Japanese text that family of estimates is off by 3–4x, so the
-   port uses a CJK-aware estimator (≈1.2 tokens per CJK character; within ±8% of
-   real counts on ~1M-token sessions) for Jev's budgets and the reduction check
-   — while replicating pi's own chars/4 formula exactly for gate decisions, so
-   the extension never disagrees with pi about whether compaction is due.
-7. **1M-token contexts required chunking.** The original throws when a history
-   does not fit the state budget. pi sessions here reach 1M tokens — far beyond
-   a single request — so oversized sessions are split into ~120k-token chunks
-   compacted sequentially, the running summary carried forward, with
-   end-pinning applied only on the final chunk so "recent" still means the true
-   tail of the conversation.
-8. **pi's context has categories Claude Code never had.** A pi session is not
+2. **The per-pass output cap is tuned from pi-side measurements rather than
+   inherited.** Each pass is capped at 5% of the context window (5 / 8 / 10%
+   selectable); overflow is trimmed 60% head / 40% tail, since errors and final
+   states sit at the end. That is aggressive on purpose, because the benchmark
+   below shows size is not what Jev lacks: forced down to 5,000 or 10,000
+   tokens, Jev's fact retention stayed at 72–91% while default compaction
+   managed only 34–45%. The cap trims redundancy, not the facts that scored —
+   and every token it saves is a token the model re-reads for the rest of the
+   session.
+3. **pi's context brings its own mix of categories.** A pi session is not
    just user/assistant text with tool uses: assistant messages carry `thinking`
    blocks and structured `toolCall` arguments, tool results arrive as separate
    `toolResult` messages (paired by id; orphans are kept as text for safety),
@@ -114,7 +69,7 @@ re-implementation of the integration, not a copy of the plugin:
    (tool_result / thinking / toolcall_args / asst_text / user_text, before vs
    after). That instrumentation exposed the port's core tension: on a real
    ~400k-token session, thinking + tool-call arguments alone were ~65% of the
-   context — categories the original never had to reason about — which drove
+   context — categories absent from the original's model — which drove
    the thinking-tail stages in the state-fitting ladder and the optional
    Jev-judged thinking/args experiments.
 
@@ -125,15 +80,6 @@ minimum-reduction fallback (the original's own rule, adopted as
 list (files read/written/edited, shown next to the summary) was dropped: the
 benchmarked configuration this port reproduces does not use it, and pass 1 is
 exactly that benchmarked algorithm.
-
-**One knob was tuned from pi-side measurements rather than inherited: the
-per-pass output cap.** Each pass is capped at 5% of the context window (5 / 8 /
-10% selectable); overflow is trimmed 60% head / 40% tail, since errors and final
-states sit at the end. That is aggressive on purpose, because the benchmark
-below shows size is not what Jev lacks: forced down to 5,000 or 10,000 tokens,
-Jev's fact retention stayed at 72–91% while default compaction managed only
-34–45%. The cap trims redundancy, not the facts that scored — and every token it
-saves is a token the model re-reads for the rest of the session.
 
 ### Measured results
 
