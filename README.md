@@ -1,12 +1,15 @@
 # pi-jev-compaction-lite
 
-**Jev decision-based compaction** for [Pi Agent](https://github.com/earendil-works/pi-coding-agent).
+**Jev decision-based compaction** for Pi Agent.
 
 Normal compaction asks an LLM to summarize the old conversation, which is **lossy**
 (paths, errors, and constraints disappear). This extension **rewrites nothing**.
 It asks Jev (a decision model) to judge each tool call/result and removes only the
 ones judged stale, or shortens them to their head. Text (user / assistant / thinking)
 is kept **verbatim**.
+
+Inspired by [fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction)
+for Claude Code.
 
 > **⚠️ Experimental software.** This extension is in an experimental stage and is provided "as is", without warranty of any kind. **The author assumes no responsibility whatsoever** for any damage or loss arising from its use.
 
