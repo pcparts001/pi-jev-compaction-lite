@@ -12,4 +12,7 @@ node_modules/
 
 # logs / scratch
 *.log
+# session / subagent transcripts (JSONL): carry prompts, cwd, session ids and tool
+# output, and would only appear here if pi were run with a project-local --session-dir
+*.jsonl
 .DS_Store
