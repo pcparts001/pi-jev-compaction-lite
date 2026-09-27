@@ -287,6 +287,15 @@ export function collectSegments(messages, opts = {}) {
 		if (m && m.role === "toolResult" && m.toolCallId)
 			resultsById.set(m.toolCallId, { message: m, index: i });
 	});
+	// Ids of the tool calls that exist, so a toolResult with no matching call can be
+	// detected. This must be built from **toolCall** blocks: building it from
+	// resultsById (which is keyed by toolResult ids) made the check below always
+	// false, silently dropping every orphan instead of keeping it as text.
+	const callIds = new Set();
+	messages.forEach((m) => {
+		if (m && m.role === "assistant")
+			for (const b of m.content || []) if (b.type === "toolCall" && b.id) callIds.add(b.id);
+	});
 	const segs = [];
 	let pairIdx = 0;
 	messages.forEach((m, mi) => {
@@ -324,7 +333,7 @@ export function collectSegments(messages, opts = {}) {
 		} else if (m.role === "toolResult") {
 			// orphan result (no matching call) -> keep as text for safety
 			const text = blocksText(m.content);
-			if (text && !resultsById.has(m.toolCallId)) {
+			if (text && !callIds.has(m.toolCallId)) {
 				segs.push({ kind: "text", role: "tool_result_orphan", text, msgIndex: mi });
 			}
 		}
@@ -748,6 +757,10 @@ export async function compactJev(messages, options = {}) {
 		if (s.kind === "text") {
 			if (s.role === "user") return "user_text";
 			if (s.role === "assistant_thinking") return "thinking";
+			// An orphan toolResult is tool output, not assistant prose. It only became
+			// reachable once collectSegments stopped dropping orphans, so it is counted
+			// here to keep the category breakdown honest.
+			if (s.role === "tool_result_orphan") return "tool_result";
 			return "asst_text";
 		}
 		return null; // pairs are counted separately as args and result
