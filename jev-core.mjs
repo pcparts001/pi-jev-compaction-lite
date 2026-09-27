@@ -7,11 +7,122 @@
  *    (user/assistant/thinking) is kept verbatim.
  *  - Shows Jev a state (full text + short notes in place of results) and asks
  *    two noul questions per pair: keep_call / keep_result.
- *  - Uses OpenRouter's /alpha/decisions endpoint.
+ *  - Talks to Jev over one of three interchangeable routes (see JEV_PROVIDERS).
+ *    All three take the same `{model, state, questions}` body and answer with
+ *    `answers[qid].noul` (a probability), so only endpoint / model / key differ.
  */
 
-const DEFAULT_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions";
-const DEFAULT_MODEL = "~typesafe/jev-latest";
+// ---------------------------------------------------------------------------
+// Jev providers (three routes to the same decision API)
+// ---------------------------------------------------------------------------
+//
+// Every route answers the same noul questions with the same response shape —
+// verified against all three: `{"answers":{"c0_call":{"type":"noul","noul":0.6}}}`.
+// Only the endpoint, the model name and the API key variable differ.
+//
+//   typesafe    TypeSafe's own API. `jev-latest` resolves to jev-1.13.0.
+//               Measured input ceiling ~65,536 tok (65,784 OK / above -> 400),
+//               i.e. the same JEV_LIMITS as the OpenRouter alpha route.
+//   commandcode Command Code proxy. `typesafe/jev` is a provider-scoped model
+//               name, and a User-Agent is required to pass its Cloudflare edge.
+//   openrouter  OpenRouter's alpha decisions endpoint (the original route).
+//
+// The 400 body is `{"detail":{"error_type":"max_tokens_exceeded"}}` on the
+// native/proxy routes too, so the existing isMaxTokens self-healing split works.
+
+export const JEV_PROVIDERS = {
+	/** TypeSafe's own API (the default route when TYPESAFE_API_KEY is set) */
+	typesafe: {
+		id: "typesafe",
+		label: "TypeSafe (native)",
+		endpoint: "https://api.typesafe.ai/v1/systemone",
+		model: "jev-latest",
+		apiKeyEnv: "TYPESAFE_API_KEY",
+		/** $42/Btok input, output free (published TypeSafe pricing) */
+		inputCostPerMTok: 0.042,
+	},
+	/** The Command Code proxy (billed in GOAT tokens, not USD) */
+	commandcode: {
+		id: "commandcode",
+		label: "Command Code (proxy)",
+		endpoint: "https://api.commandcode.ai/provider/v1/systemone",
+		model: "typesafe/jev",
+		apiKeyEnv: "COMMANDCODE_API_KEY",
+		/** Cloudflare blocks default user agents, so this UA is required */
+		userAgent: "pi-jev-reasoning-router/1.0",
+		inputCostPerMTok: null,
+	},
+	/** OpenRouter's alpha decisions endpoint (the original route) */
+	openrouter: {
+		id: "openrouter",
+		label: "OpenRouter (alpha)",
+		endpoint: "https://openrouter.ai/api/alpha/decisions",
+		model: "~typesafe/jev-latest",
+		apiKeyEnv: "OPENROUTER_JEV_API_KEY",
+		/** OpenRouter reports `usage.cost` itself, so no rate is applied */
+		inputCostPerMTok: null,
+	},
+};
+
+/** Selector: `typesafe` | `commandcode` | `openrouter` | `auto` (default) */
+export const JEV_PROVIDER_ENV = "JEV_COMPACTION_PROVIDER";
+/** `auto` = the first route whose key is set, in this order */
+export const JEV_PROVIDER_AUTO = "auto";
+/** Priority order for `auto`: TypeSafe first, then the proxy, then OpenRouter */
+export const JEV_PROVIDER_ORDER = ["typesafe", "commandcode", "openrouter"];
+/** Used when nothing can be resolved (no key at all) */
+export const DEFAULT_JEV_PROVIDER_ID = JEV_PROVIDER_ORDER[0];
+
+/** Compatibility aliases for the historical "the" endpoint/model (default provider). */
+const DEFAULT_DECISIONS_URL = JEV_PROVIDERS[DEFAULT_JEV_PROVIDER_ID].endpoint;
+const DEFAULT_MODEL = JEV_PROVIDERS[DEFAULT_JEV_PROVIDER_ID].model;
+
+/**
+ * Resolve which route answers the Jev questions.
+ *
+ *  - `JEV_COMPACTION_PROVIDER` set to a known id -> that route (source `env`).
+ *    Its key being unset is **not** silently redirected to another route; the
+ *    caller reports it and falls back to pi's default summary (no failover).
+ *  - unset / `auto` -> the first route in JEV_PROVIDER_ORDER whose key is set,
+ *    i.e. typesafe when TYPESAFE_API_KEY is present, otherwise commandcode,
+ *    otherwise openrouter. Source is `auto` (explicit) or `default` (unset).
+ *  - no key at all -> `provider: null` (the extension must do nothing).
+ *  - an unrecognized value -> the auto result plus a warning (never throws).
+ *
+ * Only whether a key is *present* is inspected; the value is never read here.
+ *
+ * @param {Record<string, string | undefined>} env
+ * @returns {{ provider: object | null, apiKey: string | null, source: string, warning?: string }}
+ */
+export function resolveJevProvider(env = process.env) {
+	const pick = (id, source, warning) => {
+		const provider = JEV_PROVIDERS[id];
+		const rateRaw = env.JEV_INPUT_COST_PER_MTOK;
+		const rate = rateRaw === undefined || rateRaw === "" ? provider.inputCostPerMTok : Number(rateRaw);
+		return {
+			provider: { ...provider, inputCostPerMTok: Number.isFinite(rate) ? rate : provider.inputCostPerMTok },
+			apiKey: env[provider.apiKeyEnv] || null,
+			source,
+			...(warning ? { warning } : {}),
+		};
+	};
+	const auto = (source) => {
+		for (const id of JEV_PROVIDER_ORDER) {
+			if (env[JEV_PROVIDERS[id].apiKeyEnv]) return pick(id, source);
+		}
+		return { provider: null, apiKey: null, source: "none" };
+	};
+
+	const raw = String(env[JEV_PROVIDER_ENV] ?? "").trim().toLowerCase();
+	if (!raw) return auto("default");
+	if (raw === JEV_PROVIDER_AUTO) return auto("auto");
+	if (JEV_PROVIDERS[raw]) return pick(raw, "env");
+	const fallback = auto("auto");
+	return {
+		...fallback,
+		warning: `unknown ${JEV_PROVIDER_ENV}="${raw}" -> using ${fallback.provider ? fallback.provider.id : "none"}`,
+	};
+}
 
 // ---------------------------------------------------------------------------
 // Measured Jev limits (determined by binary search in the benchmark; see the README)
@@ -355,13 +466,21 @@ const RES_Q = {
 	criteria: { true: "Contains critical output", false: "Re-derivable or no longer needed" },
 };
 
-async function askJevOnce(baseUrl, apiKey, model, state, questions, signal) {
-	const body = JSON.stringify({ model, state, questions });
-	const resp = await fetch(baseUrl, {
+/**
+ * One request to one route. The route carries everything that differs between
+ * providers: endpoint, model, apiKey and an optional User-Agent.
+ *
+ * @param {{endpoint:string, model:string, apiKey:string, userAgent?:string}} route
+ */
+async function askJevOnce(route, state, questions, signal) {
+	const body = JSON.stringify({ model: route.model, state, questions });
+	const resp = await fetch(route.endpoint, {
 		method: "POST",
 		headers: {
-			Authorization: `Bearer ${apiKey}`,
+			Authorization: `Bearer ${route.apiKey}`,
 			"Content-Type": "application/json",
+			// Only the Command Code proxy needs one (its Cloudflare edge rejects default UAs).
+			...(route.userAgent ? { "User-Agent": route.userAgent } : {}),
 		},
 		body,
 		signal,
@@ -370,6 +489,8 @@ async function askJevOnce(baseUrl, apiKey, model, state, questions, signal) {
 		const errBody = await resp.text().catch(() => "");
 		const err = new Error(`Jev request failed: HTTP ${resp.status} ${errBody.slice(0, 300)}`);
 		err.status = resp.status;
+		// Matches both OpenRouter's wording and the native form
+		// {"detail":{"error_type":"max_tokens_exceeded"}}.
 		err.isMaxTokens = resp.status === 400 && /max_tokens/i.test(errBody);
 		throw err;
 	}
@@ -381,11 +502,11 @@ async function askJevOnce(baseUrl, apiKey, model, state, questions, signal) {
 	return data;
 }
 
-async function askJev(baseUrl, apiKey, model, state, questions, signal, retries = 2) {
+async function askJev(route, state, questions, signal, retries = 2) {
 	let lastErr;
 	for (let attempt = 0; attempt <= retries; attempt++) {
 		try {
-			return await askJevOnce(baseUrl, apiKey, model, state, questions, signal);
+			return await askJevOnce(route, state, questions, signal);
 		} catch (err) {
 			if (signal?.aborted) throw err;
 			lastErr = err;
@@ -403,7 +524,10 @@ async function askJev(baseUrl, apiKey, model, state, questions, signal, retries 
  * @param {Array} messages  AgentMessage[] (the full set to summarize: messagesToSummarize + turnPrefixMessages)
  * @param {object} options
  *   apiKey, model, keepThreshold, truncateHeadChars, maxStateTokens, maxRequestTokens,
- *   previousSummary, fileOps {read[],written[],edited[]}, signal, baseUrl
+ *   previousSummary, fileOps {read[],written[],edited[]}, signal
+ *   provider: a resolved route from resolveJevProvider(). When omitted the route is
+ *             resolved from the environment here. `apiKey` / `model` / `baseUrl`
+ *             still override the resolved route (backward-compatible callers).
  * @returns {Promise<{summary: string, stats: object}>}
  */
 /**
@@ -445,7 +569,7 @@ export async function compactJevChunked(messages, options = {}) {
 
 	let previousSummary = null;
 	const allStats = [];
-	const allUsage = { input: 0, output: 0, cost: 0, requests: 0 };
+	const allUsage = { input: 0, output: 0, cost: 0, costEstimated: false, requests: 0 };
 	for (let i = 0; i < chunks.length; i++) {
 		const chunk = chunks[i];
 		// preserveRecentMessages refers to the tail of the *whole* conversation, so it
@@ -462,6 +586,7 @@ export async function compactJevChunked(messages, options = {}) {
 		allUsage.input += r.stats.jevUsage.input;
 		allUsage.output += r.stats.jevUsage.output;
 		allUsage.cost += r.stats.jevUsage.cost;
+		if (r.stats.jevUsage.costEstimated) allUsage.costEstimated = true;
 		allUsage.requests += r.stats.jevUsage.requests;
 	}
 	const last = allStats[allStats.length - 1];
@@ -543,8 +668,9 @@ function estTokensBefore_of(allStats) {
 export async function compactJev(messages, options = {}) {
 	const {
 		apiKey,
-		model = DEFAULT_MODEL,
-		baseUrl = DEFAULT_DECISIONS_URL,
+		provider: providerOption,
+		model: modelOption,
+		baseUrl: baseUrlOption,
 		keepThreshold = 0.5,
 		truncateHeadChars = 300,
 		truncateHeadRatio = 0.6, // share allocated to the head (the rest goes to the tail; bash errors appear at the end)
@@ -568,7 +694,31 @@ export async function compactJev(messages, options = {}) {
 		fileOps = null,
 		signal,
 	} = options;
-	if (!apiKey) throw new Error("Jev compaction: missing API key (OPENROUTER_JEV_API_KEY)");
+	// --- Route resolution -------------------------------------------------------
+	// The three Jev routes share the request/response shape, so everything that
+	// differs is carried here. `provider` is normally resolved by the caller (so it
+	// can report the route before doing any work); resolving here keeps direct
+	// programmatic callers working unchanged.
+	// Either the full result of resolveJevProvider() (which also carries the key) or
+	// a bare provider entry from JEV_PROVIDERS is accepted.
+	const resolved = providerOption ?? resolveJevProvider();
+	const provider = resolved.provider ?? resolved;
+	const route = {
+		id: provider.id ?? "custom",
+		label: provider.label ?? provider.id ?? "custom",
+		endpoint: baseUrlOption ?? provider.endpoint ?? DEFAULT_DECISIONS_URL,
+		model: modelOption ?? provider.model ?? DEFAULT_MODEL,
+		userAgent: provider.userAgent,
+		apiKey: apiKey ?? resolved.apiKey ?? (provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : null) ?? null,
+		apiKeyEnv: provider.apiKeyEnv,
+		inputCostPerMTok: provider.inputCostPerMTok ?? null,
+	};
+	if (!route.apiKey) {
+		throw new Error(
+			`Jev compaction: missing API key (${route.apiKeyEnv ?? "OPENROUTER_JEV_API_KEY"})`,
+		);
+	}
+	const model = route.model;
 
 	const started = Date.now();
 	const segsRaw = collectSegments(messages, { preserveRecentMessages });
@@ -671,8 +821,10 @@ export async function compactJev(messages, options = {}) {
 	// Registering them in decisions makes applyDecisions treat them as keep and
 	// protects them in budget selection too.
 	for (const p of pinnedPairs) decisions.set(p.idx, { call: 1, res: 1, pinned: true });
-	const usage = { requests: 0, input: 0, output: 0, cost: 0, model, requestChars: 0, stateChars: 0, questionChars: 0 };
+	const usage = { requests: 0, input: 0, output: 0, cost: 0, costEstimated: false, model, provider: route.id, requestChars: 0, stateChars: 0, questionChars: 0 };
 	let resolvedModel = model;
+	/** Whether the route reported a cost itself (OpenRouter does; the others do not) */
+	let costReported = false;
 
 	if (batches.length === 0) {
 		// Nothing to judge (text only) -> nothing can be removed
@@ -701,7 +853,7 @@ export async function compactJev(messages, options = {}) {
 		const runBatchAdaptive = async (batch) => {
 			try {
 				const questions = buildQuestions(batch);
-				const data = await askJev(baseUrl, apiKey, model, state, questions, signal);
+				const data = await askJev(route, state, questions, signal);
 				return [data];
 			} catch (err) {
 				if (!err.isMaxTokens) throw err;
@@ -736,7 +888,10 @@ export async function compactJev(messages, options = {}) {
 			const u = data.usage || {};
 			usage.input += u.input_tokens || 0;
 			usage.output += u.output_tokens || 0;
-			usage.cost += u.cost || 0;
+			if (typeof u.cost === "number") {
+				usage.cost += u.cost;
+				costReported = true;
+			}
 			for (const [qid, ans] of Object.entries(data.answers || {})) {
 				const tm = qid.match(/^t(\d+)_keep$/);
 				if (tm) {
@@ -752,6 +907,17 @@ export async function compactJev(messages, options = {}) {
 				decisions.set(idx, d);
 			}
 		}
+	}
+
+	// --- Cost accounting --------------------------------------------------------
+	// OpenRouter reports `usage.cost`; the native and proxy routes report only
+	// token counts (and Command Code is billed in GOAT tokens, not USD). So the
+	// cost is estimated from the input tokens at the route's published rate, and
+	// flagged as an estimate. `JEV_INPUT_COST_PER_MTOK` overrides the rate, and a
+	// route with no known rate (or rate 0) reports 0 rather than a made-up figure.
+	if (!costReported && route.inputCostPerMTok > 0) {
+		usage.cost = (usage.input / 1e6) * route.inputCostPerMTok;
+		usage.costEstimated = true;
 	}
 
 	// --- Apply the decisions ---
@@ -1056,6 +1222,10 @@ export async function compactJev(messages, options = {}) {
 	};
 	const stats = {
 		model: resolvedModel,
+		// Which Jev route answered (typesafe / commandcode / openrouter / custom)
+		provider: route.id,
+		providerLabel: route.label,
+		providerEndpoint: route.endpoint,
 		stage,
 		stateTokens,
 		requests: usage.requests,

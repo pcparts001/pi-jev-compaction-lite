@@ -214,43 +214,70 @@ down to 5,000–10,000 tokens.
 
 ### API key (required)
 
+Set the key of one Jev route. With `JEV_COMPACTION_PROVIDER` unset the extension
+picks the first route whose key is present, in this order:
+
 ```sh
+# 1st choice (the native TypeSafe API) — used whenever this is set
+export TYPESAFE_API_KEY="..."
+# 2nd choice (the Command Code proxy), picked only when TYPESAFE_API_KEY is unset
+export COMMANDCODE_API_KEY="..."
+# 3rd choice (the original OpenRouter route), picked only when neither above is set
 export OPENROUTER_JEV_API_KEY="sk-or-..."
 ```
 
-**If it is unset, the extension does
-nothing and pi's default summarization is used instead** (safe by design).
+**If no key is set at all, the extension does
+nothing and pi's default summarization is used instead** (safe by design). The same happens when
+the selected route's own key is missing — the route is never silently swapped for another one
+(there is no automatic failover between routes).
 
-### Jev API endpoint
+### Jev API route
 
-This extension uses OpenRouter's alpha decisions endpoint.
+The same `noul` questions are asked over one of three interchangeable routes. All three take the
+same `{model, state, questions}` body and answer with the same shape
+(`answers["<id>_call"].noul` = a probability), so only the endpoint, the model name and the key
+variable differ.
 
-| Item | Value |
-|---|---|
-| Endpoint | `https://openrouter.ai/api/alpha/decisions` |
-| Model | `~typesafe/jev-latest` |
+| Item | `typesafe` (**default**) | `commandcode` | `openrouter` |
+|---|---|---|---|
+| Endpoint | `https://api.typesafe.ai/v1/systemone` | `https://api.commandcode.ai/provider/v1/systemone` | `https://openrouter.ai/api/alpha/decisions` |
+| Model | `jev-latest` (= `jev-1.13.0`) | `typesafe/jev` (a provider-scoped name) | `~typesafe/jev-latest` |
+| Auth | `Authorization: Bearer $TYPESAFE_API_KEY` | `Authorization: Bearer $COMMANDCODE_API_KEY` + a `User-Agent` (required to pass Cloudflare) | `Authorization: Bearer $OPENROUTER_JEV_API_KEY` |
+| Cost reported by the API | no (estimated from the rate) | no (billed in GOAT tokens, not USD) | yes (`usage.cost`) |
+| Input ceiling (measured) | ~65,536 tok | ~65,536 tok | ~65,536 tok |
 
-- Works with a regular OpenRouter API key. Usage is billed to your account.
-- The Jev model can be overridden via the `JEV_MODEL` environment variable (see below).
-  The endpoint itself is fixed to `https://openrouter.ai/api/alpha/decisions` and cannot be changed.
+- The route is selected with `JEV_COMPACTION_PROVIDER` = `typesafe` | `commandcode` | `openrouter` | `auto`
+  (`auto` is the default and applies the order above). An unrecognized value falls back to `auto`
+  and adds a warning to `/jev-stats`.
+- `/jev-stats` always prints the route that would be used right now, its endpoint, its model and
+  whether its key is present (never the value).
+- The per-request limits are the same on all three routes (measured: a request above ~65,536 input
+  tokens fails with `max_tokens_exceeded` on the native route too), so the same batching and
+  self-healing apply.
+- The Jev model can be overridden with `JEV_MODEL`, but the name must be valid **for the selected
+  route** — `typesafe/jev` on the native API returns `400 Unknown model`, and `jev-latest` is not a
+  model id on the Command Code route (the proxy rewrites it internally).
 
 ## Privacy & data flow
 
 This extension sends conversation content (user / assistant / thinking text, tool calls
-and results) to OpenRouter's `alpha/decisions` endpoint so that Jev can judge it.
+and results) to the **selected Jev route** so that Jev can judge it:
+`api.typesafe.ai` by default, `api.commandcode.ai` with `JEV_COMPACTION_PROVIDER=commandcode`, or
+`openrouter.ai` with `JEV_COMPACTION_PROVIDER=openrouter`.
 
 - Images are never sent (base64 is replaced with `[image omitted]`).
 - The API key is used only in the `Authorization` header and is never logged.
-- No telemetry; the only network destination is the endpoint above.
+- No telemetry; the only network destination is the selected endpoint above.
 
-Do not use this extension on sessions whose content you are not permitted to send to OpenRouter.
+Do not use this extension on sessions whose content you are not permitted to send to the selected
+provider.
 
 ## Experimental — no warranty
 
 This extension is **experimental software** and is provided "as is", without warranty of
 any kind. **The author assumes no responsibility whatsoever** for any damage or loss
 arising from its use (including context loss caused by compaction, billing, or
-discontinuation of the alpha endpoint). Use at your own risk.
+discontinuation of any of the Jev routes). Use at your own risk.
 
 ## Usage
 
@@ -308,8 +335,12 @@ default summary for safety (preventing an infinite loop).
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENROUTER_JEV_API_KEY` | — | **required**. API key used for Jev |
-| `JEV_MODEL` | `~typesafe/jev-latest` | Jev model to use |
+| `JEV_COMPACTION_PROVIDER` | `auto` | Jev route: `typesafe` / `commandcode` / `openrouter` / `auto`. `auto` picks the first route whose key is set, in that order |
+| `TYPESAFE_API_KEY` | — | Key for the `typesafe` route (the default route) |
+| `COMMANDCODE_API_KEY` | — | Key for the `commandcode` route |
+| `OPENROUTER_JEV_API_KEY` | — | Key for the `openrouter` route (the original one) |
+| `JEV_MODEL` | the route's model | Overrides the selected route's model (must be a name that route knows) |
+| `JEV_INPUT_COST_PER_MTOK` | the route's published rate | Rate used when the route reports no `cost` (`typesafe`: `0.042`; the Command Code route has no known rate, so it reports 0) |
 | `JEV_KEEP_THRESHOLD` | `0.5` | keep / drop decision threshold |
 | `JEV_MIN_REDUCTION` | `0.25` | below this reduction, fall back to pi's default summary |
 | `JEV_KEEP_RECENT_TOKENS` | `20000` | used for the re-trigger ceiling (match pi) |
@@ -348,7 +379,7 @@ The probabilities and the threshold produce three outcomes:
 - Sessions with few tool logs do not reach a 25% reduction and **fall back to pi's
   default summary** (this is correct behavior).
 - Text messages are never removed, so compression is limited on text-heavy sessions.
-- **Uses the alpha endpoint** (see above).
+- **Uses alpha / third-party Jev routes** (see above).
 - A saturating accumulation is handed to pi's default summary (only that one pass is compressed).
 
 ## License

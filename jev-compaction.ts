@@ -35,13 +35,19 @@
  * Usage:
  *   Place in ~/.pi/agent/extensions/jev-compaction/ (global)
  * Environment variables:
- *   OPENROUTER_JEV_API_KEY (required) / JEV_MODEL / JEV_KEEP_THRESHOLD
- *   JEV_MIN_REDUCTION / JEV_DEBUG
+ *   JEV_COMPACTION_PROVIDER = typesafe | commandcode | openrouter | auto (default auto)
+ *     auto picks the first route whose key is set: TYPESAFE_API_KEY -> typesafe,
+ *     else COMMANDCODE_API_KEY -> commandcode, else OPENROUTER_JEV_API_KEY -> openrouter.
+ *     With no key at all the extension does nothing and pi's default summary is used.
+ *   TYPESAFE_API_KEY / COMMANDCODE_API_KEY / OPENROUTER_JEV_API_KEY (the route's key)
+ *   JEV_MODEL (overrides the selected route's model; must match that route)
+ *   JEV_KEEP_THRESHOLD / JEV_MIN_REDUCTION / JEV_DEBUG
+ *   JEV_INPUT_COST_PER_MTOK (cost rate for routes that do not report a cost)
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
-import { compactJevChunked } from "./jev-core.mjs";
+import { compactJevChunked, resolveJevProvider, JEV_PROVIDER_ENV } from "./jev-core.mjs";
 
 function dbg(msg: string): void {
 	if (!process.env.JEV_DEBUG) return;
@@ -61,6 +67,20 @@ function num(name: string, dflt: number): number {
 
 function fmtTokens(n: number): string {
 	return n.toLocaleString("en-US");
+}
+
+/**
+ * Render the Jev usage of one run.
+ *
+ * Routes differ in what they report: OpenRouter returns a `cost`, while the
+ * native TypeSafe / Command Code routes return only token counts. A cost that
+ * was derived from the route's input rate is marked `~`, and a route with no
+ * known rate (Command Code is billed in GOAT tokens) reports tokens instead of
+ * inventing a dollar figure.
+ */
+function fmtCost(usage: { input: number; output: number; cost: number; costEstimated?: boolean }): string {
+	if (usage.cost > 0) return `${usage.costEstimated ? "~" : ""}$${usage.cost.toFixed(6)}`;
+	return `${fmtTokens(usage.input)} in / ${fmtTokens(usage.output)} out tok, cost n/a`;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +262,10 @@ const DEV_THRESHOLD_CHOICES = [2, 5, 8, 10, 20];
 
 interface JevStats {
 	model: string;
+	/** Which Jev route answered: typesafe / commandcode / openrouter / custom */
+	provider: string;
+	providerLabel: string;
+	providerEndpoint: string;
 	stage: number;
 	stateTokens: number;
 	requests: number;
@@ -250,7 +274,7 @@ interface JevStats {
 	chars: { before: number; after: number };
 	estTokens: { summarizedBefore: number; summary: number };
 	reduction: number;
-	jevUsage: { requests: number; input: number; output: number; cost: number };
+	jevUsage: { requests: number; input: number; output: number; cost: number; costEstimated?: boolean };
 	elapsedMs: number;
 }
 
@@ -293,7 +317,18 @@ export default function (pi: ExtensionAPI) {
 	let devOneShot = false;
 
 	pi.on("session_before_compact", async (event, ctx) => {
-		const apiKey = process.env.OPENROUTER_JEV_API_KEY;
+		// Which Jev route answers is resolved once, here, so the notifications can
+		// name it before any request is made. No cross-route failover: a selected
+		// route whose key is missing falls back to pi's default summary instead.
+		const jev = resolveJevProvider();
+		if (!jev.provider || !jev.apiKey) {
+			const why = jev.provider
+				? `${jev.provider.apiKeyEnv} not set (${JEV_PROVIDER_ENV}=${jev.provider.id})`
+				: "no Jev provider key set (TYPESAFE_API_KEY / COMMANDCODE_API_KEY / OPENROUTER_JEV_API_KEY)";
+			ctx.ui.notify(`jev-compaction: ${why}, falling back to default compaction`, "warning");
+			return;
+		}
+		const apiKey = jev.apiKey;
 		const { preparation, signal } = event;
 		// Previous compaction summary (passed in by pi).
 		// It is **never fed to Jev**; it is concatenated verbatim at the head to protect it (accumulating scheme).
@@ -316,16 +351,12 @@ export default function (pi: ExtensionAPI) {
 		devOneShot = false;
 		const budgetPct = isDev ? devPct : pct;
 
-		if (!apiKey) {
-			ctx.ui.notify("jev-compaction: OPENROUTER_JEV_API_KEY not set, falling back to default compaction", "warning");
-			return;
-		}
 		// Production compresses the range pi chose (it does not mimic the benchmark's artificial cut)
 		const messages = [...messagesToSummarize, ...turnPrefixMessages];
 		if (messages.length === 0) return; // nothing to do → default
 
 		ctx.ui.notify(
-			`jev-compaction: scoring ${messages.length} messages (${fmtTokens(tokensBefore)} ctx tokens, budget ${budgetPct}%${isDev ? " [dev]" : ""}) with Jev…`,
+			`jev-compaction: scoring ${messages.length} messages (${fmtTokens(tokensBefore)} ctx tokens, budget ${budgetPct}%${isDev ? " [dev]" : ""}) with Jev via ${jev.provider.label}…`,
 			"info",
 		);
 
@@ -336,6 +367,8 @@ export default function (pi: ExtensionAPI) {
 			// and causes HTTP 400 max_tokens_exceeded on 1M-scale sessions). Below, previousSummary
 			// is concatenated verbatim at the head of the output to protect it.
 			const { summary, stats } = await compactJevChunked(messages, {
+				// The route resolved above: endpoint, model and auth all come from it.
+				provider: jev.provider,
 				apiKey,
 				model: process.env.JEV_MODEL || undefined,
 				keepThreshold: num("JEV_KEEP_THRESHOLD", 0.5),
@@ -437,7 +470,8 @@ export default function (pi: ExtensionAPI) {
 					`reduction=${reduction} capped=${capped.capped} budget=${budget} new=${summaryTokens} prev=${prevTokens} total=${totalTokens} reason=${event.reason}`,
 			);
 			ctx.ui.notify(
-				`jev-compaction: kept ${stats.decisions.keep} / truncated ${stats.decisions.truncate} / dropped ${stats.decisions.drop} tool calls in ${stats.elapsedMs}ms ($${stats.jevUsage.cost.toFixed(6)})` +
+				`jev-compaction: kept ${stats.decisions.keep} / truncated ${stats.decisions.truncate} / dropped ${stats.decisions.drop} tool calls in ${stats.elapsedMs}ms (${fmtCost(stats.jevUsage)})` +
+					` via ${stats.providerLabel ?? stats.provider}` +
 					` | new ${fmtTokens(summaryTokens)} tok${capped.capped ? ` (capped to ${budgetPct}% = ${fmtTokens(budget)})` : ""}` +
 					(prevTokens > 0
 						? ` + prev ${fmtTokens(prevTokens)} tok (verbatim protected) = total ${fmtTokens(totalTokens)} tok`
@@ -451,7 +485,9 @@ export default function (pi: ExtensionAPI) {
 					summary: finalText,
 					firstKeptEntryId,
 					tokensBefore,
-					// Map OpenRouter usage onto pi's Usage shape (reflected in the session total)
+					// Map the Jev route's reported/estimated usage onto pi's Usage shape (reflected in the session total).
+					// `cost` is 0 for a route that reports neither a cost nor a known rate (Command Code is
+					// billed in GOAT tokens), in which case the token counts still reflect the real usage.
 					usage: {
 						input: stats.jevUsage.input,
 						output: stats.jevUsage.output,
@@ -612,6 +648,14 @@ export default function (pi: ExtensionAPI) {
 					? `model view ${((usage.tokens / ctxWindow) * 100).toFixed(1)}% (API usage ${fmtTokens(usage.tokens)} tok; not included in the compact decision)`
 					: "model view unknown (e.g. before any LLM response)";
 			parts.push(`${g.canCompact ? "✅ compactable" : "❌ not compactable"} (${g.reason})`);
+			// Which Jev route would answer right now, and whether its key is present
+			// (the key value itself is never read here, only its presence).
+			const jev = resolveJevProvider();
+			parts.push(
+				jev.provider
+					? `jev route ${jev.provider.id} (${jev.provider.label}, ${jev.source}${jev.warning ? ` / ${jev.warning}` : ""}): ${jev.provider.endpoint} / ${process.env.JEV_MODEL || jev.provider.model} / ${jev.provider.apiKeyEnv}=${jev.apiKey ? "set" : "MISSING"} (${JEV_PROVIDER_ENV}=${process.env[JEV_PROVIDER_ENV] ?? "unset"}. typesafe | commandcode | openrouter | auto)`
+					: `jev route: none (set TYPESAFE_API_KEY, COMMANDCODE_API_KEY or OPENROUTER_JEV_API_KEY; ${JEV_PROVIDER_ENV}=${process.env[JEV_PROVIDER_ENV] ?? "unset"})`,
+			);
 			parts.push(
 				`${g.messageCount} messages, est. ${fmtTokens(g.messageTokens)} tok (pi's char/4, thinking included)`,
 			);
@@ -635,7 +679,7 @@ export default function (pi: ExtensionAPI) {
 						(prevTokens > 0
 							? ` + prev ${fmtTokens(prevTokens)} tok (verbatim) = total ${fmtTokens(totalTokens)} tok`
 							: " (no prev)") +
-						` | ${s.requests} req, $${s.jevUsage.cost.toFixed(6)}, ${s.elapsedMs}ms | stage ${s.stage}, reason=${reason}`,
+						` | ${s.requests} req, ${fmtCost(s.jevUsage)}, ${s.elapsedMs}ms | stage ${s.stage}, route ${s.providerLabel ?? s.provider}, reason=${reason}`,
 				);
 			}
 
