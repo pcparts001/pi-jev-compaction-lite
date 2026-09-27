@@ -24,6 +24,10 @@ pi remove ssh://git@github.com/pcparts001/pi-jev-compaction-lite
 This removes the entry from `settings.json` **and** deletes the cloned
 directory, so the extension is gone completely.
 
+The package declares **no dependencies and no peer dependencies** — the extension
+imports only types from `@earendil-works/pi-coding-agent`, and pi resolves its own
+API at runtime — so `pi install` downloads just the repository files.
+
 ### Option 2: manual placement
 
 ```sh
