@@ -32,11 +32,12 @@ API at runtime — so `pi install` downloads just the repository files.
 
 ```sh
 git clone https://github.com/pcparts001/pi-jev-compaction-lite.git \
-  ~/.pi/agent/extensions/jev-compaction
+  ~/.pi/agent/extensions/pi-jev-compaction-lite
 ```
 
 Because `package.json` declares the entry point via `pi.extensions`, **no file
-renaming is required**.
+renaming is required**. The directory name is yours to choose and has no effect on the
+runtime: the command is `/jev-compact` either way.
 
 ## About this extension
 
